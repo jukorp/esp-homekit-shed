@@ -41,6 +41,7 @@ export ESPPORT=/dev/tty.SLAB_USBtoUART
 ```shell
     make -C temperature_sensor flash
     make -C temperature_sensor monitor
+```
   and, after it has been flashed once and the Wifi connection configured, you can use OTA updates
 ```shell
     make -C temperature_sensor ota
