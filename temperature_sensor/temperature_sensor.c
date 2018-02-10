@@ -220,7 +220,7 @@ void user_init(void) {
     name.value = HOMEKIT_STRING(name_value);
     serialNumber.value = HOMEKIT_STRING(serial_value);
 
-    wifi_config_init(name_value, NULL, on_wifi_ready);
+    wifi_config_init("Temperature Sensor", NULL, on_wifi_ready);
     printf("~~~ Name: %s\n", name_value);
     printf("~~~ Serial Number: %s\n", serial_value);
     printf("~~~ Firmware build version: %s\n", BUILD_VERSION);

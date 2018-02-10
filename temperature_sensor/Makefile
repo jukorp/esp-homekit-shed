@@ -14,7 +14,7 @@ EXTRA_COMPONENTS = \
 SENSOR_PIN = 14
 LED_PIN = 2
 
-FLASH_SIZE = 32
+FLASH_SIZE = 16
 
 BUILD_VERSION=`date +'"%Y%m%d.%H%M"'`
 
@@ -31,5 +31,5 @@ ota:
 	echo put $(FW_FILE) firmware.bin >> tftp.tftp
 	echo quit >> tftp.tftp
 	$(MAKE) all
-	tftp 192.168.0.74 < tftp.tftp || true
+	tftp $(ESPIP) < tftp.tftp || true
 	rm tftp.tftp
