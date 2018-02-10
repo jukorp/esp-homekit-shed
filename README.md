@@ -26,7 +26,7 @@ git submodule update --init --recursive
     ```
 6. Build example:
 ```shell
-make -C temperaturesensor all
+make -C temperature_sensor all
 ```
 7. Set ESPPORT environment variable pointing to USB device your ESP8266 is attached
    to (assuming your device is at /dev/tty.SLAB_USBtoUART):
@@ -35,10 +35,10 @@ export ESPPORT=/dev/tty.SLAB_USBtoUART
 ```
 8. Upload firmware to ESP:
 ```shell
-    make -C temperaturesensor test
+    make -C temperature_sensor test
 ```
   or
 ```shell
-    make -C temperaturesensor flash
-    make -C temperaturesensor monitor
+    make -C temperature_sensor flash
+    make -C temperature_sensor monitor
 ```
