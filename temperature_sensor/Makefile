@@ -5,9 +5,9 @@ EXTRA_COMPONENTS = \
 	extras/http-parser \
 	extras/dhcpserver \
 	extras/rboot-ota \
+	$(abspath ../components/wifi_config) \
 	$(abspath ../components/wolfssl) \
 	$(abspath ../components/cJSON) \
-	$(abspath ../components/wifi_config) \
 	$(abspath ../components/homekit)
 
 # DHT11 sensor pin
