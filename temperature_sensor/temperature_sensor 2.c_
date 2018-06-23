@@ -1,0 +1,441 @@
+#define configENABLE_BACKWARD_COMPATIBILITY 1
+#include <stdio.h>
+#include <espressif/esp_wifi.h>
+#include <espressif/esp_sta.h>
+
+#include <netdb.h>
+#include <unistd.h>
+#include "espressif/esp_common.h"
+#include <esp/uart.h>
+#include <esp8266.h>
+#include <FreeRTOS.h>
+#include <task.h>
+#include <string.h>
+
+#include <homekit/homekit.h>
+#include <homekit/characteristics.h>
+#include <wifi_config.h>
+#include <dht/dht.h>
+
+#include "ota-tftp.h"
+#include "rboot-api.h"
+
+#include "lwip/err.h"
+#include "lwip/sockets.h"
+#include "lwip/sys.h"
+#include "lwip/netdb.h"
+#include "lwip/dns.h"
+#include "lwip/api.h"
+
+/* mbedtls/config.h MUST appear before all other mbedtls headers, or
+   you'll get the default config.
+
+   (Although mostly that isn't a big problem, you just might get
+   errors at link time if functions don't exist.) */
+#include "mbedtls/config.h"
+
+#include "mbedtls/net_sockets.h"
+#include "mbedtls/debug.h"
+#include "mbedtls/ssl.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/error.h"
+#include "mbedtls/certs.h"
+
+/* Root cert for howsmyssl.com, stored in cert.c */
+extern const char *server_root_cert;
+
+#define WEB_SERVER "milliamp.org"
+#define WEB_PORT "80"
+#define WEB_URL "https://milliamp.org/temperatures/post.php"
+
+#ifndef SENSOR_PIN
+#error SENSOR_PIN is not specified
+#endif
+
+#ifndef LED_PIN
+#error LED_PIN is not specified
+#endif
+
+
+void led_write(bool on) {
+    gpio_write(LED_PIN, on ? 0 : 1);
+}
+void temperature_sensor_identify(homekit_value_t _value) {
+    printf("Temperature sensor identify\n");
+    for (int i=0; i<3; i++) {
+        for (int j=0; j<2; j++) {
+            led_write(true);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            led_write(false);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+
+        vTaskDelay(250 / portTICK_PERIOD_MS);
+    }
+}
+
+
+homekit_characteristic_t temperature = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0);
+homekit_characteristic_t humidity    = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 0);
+
+void http_get_task(void *pvParameters)
+{
+    int successes = 0, failures = 0, ret;
+    printf("HTTP get task starting...\n");
+
+    uint32_t flags;
+    unsigned char buf[1024];
+    const char *pers = "ssl_client1";
+
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_ssl_context ssl;
+    mbedtls_x509_crt cacert;
+    mbedtls_ssl_config conf;
+    mbedtls_net_context server_fd;
+
+    /*
+     * 0. Initialize the RNG and the session data
+     */
+    mbedtls_ssl_init(&ssl);
+    mbedtls_x509_crt_init(&cacert);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    printf("\n  . Seeding the random number generator...");
+
+    mbedtls_ssl_config_init(&conf);
+
+    mbedtls_entropy_init(&entropy);
+    if((ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                    (const unsigned char *) pers,
+                                    strlen(pers))) != 0)
+    {
+        printf(" failed\n  ! mbedtls_ctr_drbg_seed returned %d\n", ret);
+        abort();
+    }
+
+    printf(" ok\n");
+
+    /*
+     * 0. Initialize certificates
+     */
+    printf("  . Loading the CA root certificate ...");
+
+    ret = mbedtls_x509_crt_parse(&cacert, (uint8_t*)server_root_cert, strlen(server_root_cert)+1);
+    if(ret < 0)
+    {
+        printf(" failed\n  !  mbedtls_x509_crt_parse returned -0x%x\n\n", -ret);
+        abort();
+    }
+
+    printf(" ok (%d skipped)\n", ret);
+
+    /* Hostname set here should match CN in server certificate */
+    if((ret = mbedtls_ssl_set_hostname(&ssl, WEB_SERVER)) != 0)
+    {
+        printf(" failed\n  ! mbedtls_ssl_set_hostname returned %d\n\n", ret);
+        abort();
+    }
+
+    /*
+     * 2. Setup stuff
+     */
+    printf("  . Setting up the SSL/TLS structure...");
+
+    if((ret = mbedtls_ssl_config_defaults(&conf,
+                                          MBEDTLS_SSL_IS_CLIENT,
+                                          MBEDTLS_SSL_TRANSPORT_STREAM,
+                                          MBEDTLS_SSL_PRESET_DEFAULT)) != 0)
+    {
+        printf(" failed\n  ! mbedtls_ssl_config_defaults returned %d\n\n", ret);
+        goto exit;
+    }
+
+    printf(" ok\n");
+
+    /* OPTIONAL is not optimal for security, in this example it will print
+       a warning if CA verification fails but it will continue to connect.
+    */
+    mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL);
+    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+#ifdef MBEDTLS_DEBUG_C
+    mbedtls_debug_set_threshold(DEBUG_LEVEL);
+    mbedtls_ssl_conf_dbg(&conf, my_debug, stdout);
+#endif
+
+    if((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0)
+    {
+        printf(" failed\n  ! mbedtls_ssl_setup returned %d\n\n", ret);
+        goto exit;
+    }
+
+    /* Wait until we can resolve the DNS for the server, as an indication
+       our network is probably working...
+    */
+    printf("Waiting for server DNS to resolve... ");
+    err_t dns_err;
+    ip_addr_t host_ip;
+    do {
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        dns_err = netconn_gethostbyname(WEB_SERVER, &host_ip);
+    } while(dns_err != ERR_OK);
+    printf("done.\n");
+
+    char details[80];
+
+    while(1) {
+
+    buf[0] = '\0';
+    snprintf(details, 80, "temp=%.3f&humiditiy=%.3f&device=ABCD", temperature.value.float_value, humidity.value.float_value);
+
+    snprintf(buf, 1024, 
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: esp-open-rtos/0.1 esp8266\r\n"
+        "Connection: close\r\n"
+        "Content-Type: application/json; charset=UTF-8\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n"
+        "%s\r\n", WEB_URL, WEB_SERVER, strlen(details), details);
+    printf(buf);
+
+
+
+        mbedtls_net_init(&server_fd);
+        printf("top of loop, free heap = %u\n", xPortGetFreeHeapSize());
+        /*
+         * 1. Start the connection
+         */
+        printf("  . Connecting to %s:%s...", WEB_SERVER, WEB_PORT);
+
+        if((ret = mbedtls_net_connect(&server_fd, WEB_SERVER,
+                                      WEB_PORT, MBEDTLS_NET_PROTO_TCP)) != 0)
+        {
+            printf(" failed\n  ! mbedtls_net_connect returned %d\n\n", ret);
+            goto exit;
+        }
+
+        printf(" ok\n");
+
+        mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+        /*
+         * 4. Handshake
+         */
+        printf("  . Performing the SSL/TLS handshake...");
+
+        while((ret = mbedtls_ssl_handshake(&ssl)) != 0)
+        {
+            if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
+            {
+                printf(" failed\n  ! mbedtls_ssl_handshake returned -0x%x\n\n", -ret);
+                goto exit;
+            }
+        }
+
+        printf(" ok\n");
+
+        /*
+         * 5. Verify the server certificate
+         */
+        printf("  . Verifying peer X.509 certificate...");
+
+        /* In real life, we probably want to bail out when ret != 0 */
+        if((flags = mbedtls_ssl_get_verify_result(&ssl)) != 0)
+        {
+            char vrfy_buf[512];
+
+            printf(" failed\n");
+
+            mbedtls_x509_crt_verify_info(vrfy_buf, sizeof(vrfy_buf), "  ! ", flags);
+
+            printf("%s\n", vrfy_buf);
+        }
+        else
+            printf(" ok\n");
+
+        /*
+         * 3. Write the GET request
+         */
+        printf("  > Write to server:");
+
+        int len = strlen(buf);//sprintf((char *) buf, GET_REQUEST);
+
+        while((ret = mbedtls_ssl_write(&ssl, buf, len)) <= 0)
+        {
+            if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
+            {
+                printf(" failed\n  ! mbedtls_ssl_write returned %d\n\n", ret);
+                goto exit;
+            }
+        }
+
+        len = ret;
+        printf(" %d bytes written\n\n%s", len, (char *) buf);
+
+        /*
+         * 7. Read the HTTP response
+         */
+        printf("  < Read from server:");
+
+        do
+        {
+            len = sizeof(buf) - 1;
+            memset(buf, 0, sizeof(buf));
+            ret = mbedtls_ssl_read(&ssl, buf, len);
+
+            if(ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+                continue;
+
+            if(ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+                ret = 0;
+                break;
+            }
+
+            if(ret < 0)
+            {
+                printf("failed\n  ! mbedtls_ssl_read returned %d\n\n", ret);
+                break;
+            }
+
+            if(ret == 0)
+            {
+                printf("\n\nEOF\n\n");
+                break;
+            }
+
+            len = ret;
+            printf(" %d bytes read\n\n%s", len, (char *) buf);
+        } while(1);
+
+        mbedtls_ssl_close_notify(&ssl);
+
+    exit:
+        mbedtls_ssl_session_reset(&ssl);
+        mbedtls_net_free(&server_fd);
+
+        if(ret != 0)
+        {
+            char error_buf[100];
+            mbedtls_strerror(ret, error_buf, 100);
+            printf("\n\nLast error was: %d - %s\n\n", ret, error_buf);
+            failures++;
+        } else {
+            successes++;
+        }
+
+        printf("\n\nsuccesses = %d failures = %d\n", successes, failures);
+        for(int countdown = successes ? 10 : 5; countdown >= 0; countdown--) {
+            printf("%d... ", countdown);
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+        }
+        printf("\nStarting again!\n");
+    }
+}
+
+
+void temperature_sensor_task(void *_args) {
+    gpio_set_pullup(SENSOR_PIN, false, false);
+
+    float humidity_value, temperature_value;
+    while (1) {
+        bool success = dht_read_float_data(
+            DHT_TYPE_DHT22, SENSOR_PIN,
+            &humidity_value, &temperature_value
+        );
+        if (success) {
+            temperature.value.float_value = temperature_value;
+            humidity.value.float_value = humidity_value;
+
+            homekit_characteristic_notify(&temperature, HOMEKIT_FLOAT(temperature_value));
+            homekit_characteristic_notify(&humidity, HOMEKIT_FLOAT(humidity_value));
+
+            printf("Current temperature: ");
+            printf("%.2f",temperature_value);
+            printf("\n");
+        } else {
+            printf("Couldnt read data from sensor\n");
+        }
+        //post_data();
+
+        vTaskDelay(3000 / portTICK_PERIOD_MS);
+    }
+}
+
+void temperature_sensor_init() {
+    xTaskCreate(temperature_sensor_task, "Temperature Sensor", 256, NULL, 2, NULL);
+    gpio_enable(LED_PIN, GPIO_OUTPUT);
+    led_write(true);
+    vTaskDelay(250 / portTICK_PERIOD_MS);
+    led_write(false);
+}
+
+homekit_characteristic_t name = HOMEKIT_CHARACTERISTIC_(NAME, "Temperature Sensor");
+homekit_characteristic_t serialNumber = HOMEKIT_CHARACTERISTIC_(SERIAL_NUMBER, "XXXXXXXXXX");
+
+homekit_accessory_t *accessories[] = {
+    HOMEKIT_ACCESSORY(.id=1, .category=homekit_accessory_category_thermostat, .services=(homekit_service_t*[]) {
+        HOMEKIT_SERVICE(ACCESSORY_INFORMATION, .characteristics=(homekit_characteristic_t*[]) {
+            &name,
+            HOMEKIT_CHARACTERISTIC(MANUFACTURER, "Alex"),
+            &serialNumber,
+            HOMEKIT_CHARACTERISTIC(MODEL, "TemperatureSensor1,1"),
+            HOMEKIT_CHARACTERISTIC(FIRMWARE_REVISION, BUILD_VERSION),
+            HOMEKIT_CHARACTERISTIC(IDENTIFY, temperature_sensor_identify),
+            NULL
+        }),
+        HOMEKIT_SERVICE(TEMPERATURE_SENSOR, .primary=true, .characteristics=(homekit_characteristic_t*[]) {
+            HOMEKIT_CHARACTERISTIC(NAME, "Temperature Sensor"),
+            &temperature,
+            NULL
+        }),
+        HOMEKIT_SERVICE(HUMIDITY_SENSOR, .characteristics=(homekit_characteristic_t*[]) {
+            HOMEKIT_CHARACTERISTIC(NAME, "Humidity Sensor"),
+            &humidity,
+            NULL
+        }),
+        NULL
+    }),
+    NULL
+};
+
+homekit_server_config_t config = {
+    .accessories = accessories,
+    .password = "506-81-392"
+};
+
+void on_wifi_ready() {
+    homekit_server_init(&config);
+    temperature_sensor_init();
+    ota_tftp_init_server(TFTP_PORT);
+    xTaskCreate(http_get_task, "HTTP Post Task", 2048, NULL, 1, NULL);
+}
+
+void user_init(void) {
+    uart_set_baud(0, 115200);
+
+    uint8_t macaddr[6];
+    sdk_wifi_get_macaddr(STATION_IF, macaddr);
+
+    int name_len = snprintf(NULL, 0, "Temperature Sensor %02X%02X%02X",
+                            macaddr[3], macaddr[4], macaddr[5]);
+    char *name_value = malloc(name_len+1);
+    snprintf(name_value, name_len+1, "Temperature Sensor %02X%02X%02X",
+             macaddr[3], macaddr[4], macaddr[5]);
+
+    int serial_len = snprintf(NULL, 0, "%02X%02X%02X%02X%02X%02X",
+                            macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4], macaddr[5]);
+    char *serial_value = malloc(serial_len+1);
+    snprintf(serial_value, serial_len+1, "%02X%02X%02X%02X%02X%02X",
+             macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4], macaddr[5]);
+
+    name.value = HOMEKIT_STRING(name_value);
+    serialNumber.value = HOMEKIT_STRING(serial_value);
+
+    wifi_config_init("Temperature Sensor", NULL, on_wifi_ready);
+    printf("~~~ Name: %s\n", name_value);
+    printf("~~~ Serial Number: %s\n", serial_value);
+    printf("~~~ Firmware build version: %s\n", BUILD_VERSION);
+}
+
