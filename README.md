@@ -1,4 +1,4 @@
-# esp-homekit-temperaturessensor
+# esp-homekit-shed
 Temperature sensor implementation based upon maximkulkin/esp-homekit-demo
 
 Build from the examples at https://github.com/maximkulkin/esp-homekit.
