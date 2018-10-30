@@ -33,15 +33,15 @@ void temperature_sensor_identify(homekit_value_t _value) {
 }
 
 //west external
-homekit_characteristic_t temperature1 = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0);
+homekit_characteristic_t temperature1 = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0, .min_value=(float[]) {-30});
 homekit_characteristic_t humidity1    = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 0);
 
 //east external
-homekit_characteristic_t temperature2 = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0);
+homekit_characteristic_t temperature2 = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0, .min_value=(float[]) {-30});
 homekit_characteristic_t humidity2    = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 0);
 
 // interior
-homekit_characteristic_t temperature3 = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0);
+homekit_characteristic_t temperature3 = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 0, .min_value=(float[]) {-30});
 homekit_characteristic_t humidity3    = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 0);
 
 // 9.2 fan
@@ -60,6 +60,7 @@ homekit_characteristic_t thermostat_target_temperature = HOMEKIT_CHARACTERISTIC_
 
 bool east_west_fan_current = false;
 bool west_east_fan_current = false;
+bool was_under_themostat_control = false;
 
 homekit_value_t east_west_fan_get() {
     return HOMEKIT_BOOL(east_west_fan_current);
@@ -142,10 +143,11 @@ void temperature_sensor_task(void *_args) {
     gpio_enable(EASTWEST_FAN, GPIO_OUTPUT);
     gpio_enable(WESTEAST_FAN, GPIO_OUTPUT);
 
-    bool west_east_target = false;
-    bool east_west_target = false;
 
     while (1) {
+        bool west_east_target = west_east_fan_current;
+        bool east_west_target = east_west_fan_current;
+
         read_temperature_sensor(SENSOR1_PIN, &temperature1, &humidity1);
         vTaskDelay(100 / portTICK_PERIOD_MS);
         read_temperature_sensor(SENSOR2_PIN, &temperature2, &humidity2);
@@ -156,7 +158,7 @@ void temperature_sensor_task(void *_args) {
         float east = temperature2.value.float_value;
         float internal = temperature3.value.float_value;
         float target = thermostat_target_temperature.value.float_value;
-        float mode = thermostat_target_state.value.int_value;
+        int mode = thermostat_target_state.value.int_value;
         float cooling = mode == 2;
         float heating = mode == 1;
         float automatic = mode == 3;
@@ -170,6 +172,9 @@ void temperature_sensor_task(void *_args) {
             east,
             west,
             target);         
+        printf("eastwestfans_current=%s westeastfans_current=%s\n", 
+            east_west_fan_current?"on":"off",
+            west_east_fan_current?"on":"off");         
 
         // inside > target && (cooling || auto)
             // if east < inside
@@ -193,6 +198,7 @@ void temperature_sensor_task(void *_args) {
                 // east_west fans off
         if (internal > target + threshold && (cooling || automatic))
         {
+            puts("cooling mode");
             if (east < internal)
             {
                 east_west_target = true;
@@ -214,9 +220,11 @@ void temperature_sensor_task(void *_args) {
 
                 mode = 0;
             }
+            was_under_themostat_control = true;
         }  
         else if (internal < target - threshold && (heating || automatic))
         {
+            puts("heating mode");
             if (east > internal)
             {
                 east_west_target = true;
@@ -238,12 +246,27 @@ void temperature_sensor_task(void *_args) {
 
                 mode = 0;
             }
+            was_under_themostat_control = true;
+        }
+        else if (cooling || heating || automatic)
+        {
+            puts("we are under thermostat control so force fans off");
+
+            east_west_target = false;
+            west_east_target = false;
+            was_under_themostat_control = true;
+        }
+        else if (was_under_themostat_control)
+        {    
+            was_under_themostat_control = false;
+
+            west_east_target = false;
+            east_west_target = false;
+
+            mode = 0;
         }
         else
         {
-            east_west_target = false;
-            west_east_target = false;
-            
             mode = 0;
         }
 
@@ -269,7 +292,8 @@ void temperature_sensor_task(void *_args) {
             homekit_characteristic_notify(&thermostat_current_state, HOMEKIT_UINT8(mode));
         }
 
-        printf("current=%s fans_east=%s fans_west=%s\n", 
+        printf("mode=%i current=%s fans_east=%s fans_west=%s\n", 
+            mode,
             mode == 0 ? "off" : (mode == 1 ? "heat" : (mode == 2 ? "cool" : "--")),
             east_west_target ? "on" : "off",
             west_east_target ? "on" : "off");         
