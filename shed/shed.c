@@ -109,11 +109,11 @@ homekit_characteristic_t west_east_fan_state = HOMEKIT_CHARACTERISTIC_(ON, false
  */
 
 
-void read_temperature_sensor(int pin, homekit_characteristic_t* temperature, homekit_characteristic_t* humidity) {
+void read_temperature_sensor(int pin, bool isDHT22, homekit_characteristic_t* temperature, homekit_characteristic_t* humidity) {
     float humidity_value, temperature_value;
 
     bool success = dht_read_float_data(
-        DHT_TYPE_DHT22, pin,
+        isDHT22 ? DHT_TYPE_DHT22 : DHT_TYPE_DHT11, pin,
         &humidity_value, &temperature_value
     );
     
@@ -148,11 +148,11 @@ void temperature_sensor_task(void *_args) {
         bool west_east_target = west_east_fan_current;
         bool east_west_target = east_west_fan_current;
 
-        read_temperature_sensor(SENSOR1_PIN, &temperature1, &humidity1);
+        read_temperature_sensor(SENSOR1_PIN, SENSOR1_DHT22, &temperature1, &humidity1);
         vTaskDelay(100 / portTICK_PERIOD_MS);
-        read_temperature_sensor(SENSOR2_PIN, &temperature2, &humidity2);
+        read_temperature_sensor(SENSOR2_PIN, SENSOR2_DHT22, &temperature2, &humidity2);
         vTaskDelay(100 / portTICK_PERIOD_MS);
-        read_temperature_sensor(SENSOR3_PIN, &temperature3, &humidity3);
+        read_temperature_sensor(SENSOR3_PIN, SENSOR3_DHT22, &temperature3, &humidity3);
 
         float west = temperature1.value.float_value;
         float east = temperature2.value.float_value;
@@ -199,17 +199,12 @@ void temperature_sensor_task(void *_args) {
         if (internal > target + threshold && (cooling || automatic))
         {
             puts("cooling mode");
-            if (east < internal)
+            bool lowestIsEast = east < west;
+            int lowestTemp = lowestIsEast ? east : west;
+            if (lowestTemp < internal)
             {
-                east_west_target = true;
-                west_east_target = false;
-
-                mode = 2;
-            }
-            else if (west < internal)
-            {
-                east_west_target = false;
-                west_east_target = true;
+                east_west_target = lowestIsEast;
+                west_east_target = !lowestIsEast;
 
                 mode = 2;
             }
@@ -225,17 +220,12 @@ void temperature_sensor_task(void *_args) {
         else if (internal < target - threshold && (heating || automatic))
         {
             puts("heating mode");
-            if (east > internal)
+            bool warmestIsEast = east < west;
+            int warmestTemp = warmestIsEast ? east : west;
+            if (warmestTemp > internal)
             {
-                east_west_target = true;
-                west_east_target = false;
-
-                mode = 1;
-            }
-            else if (west > internal)
-            {
-                east_west_target = false;
-                west_east_target = true;
+                east_west_target = warmestIsEast;
+                west_east_target = !warmestIsEast;
 
                 mode = 1;
             }

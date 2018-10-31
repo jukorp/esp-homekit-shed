@@ -1,2 +1,5 @@
 build/
 firmware/
+node_modules/
+.vscode/
+wifi.h

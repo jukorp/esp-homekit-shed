@@ -1,0 +1,26 @@
+{
+  "name": "esp-homekit-shed",
+  "version": "1.0.0",
+  "description": "Temperature sensor implementation based upon maximkulkin/esp-homekit-demo",
+  "main": "update-all-firmware.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "build-shed",
+    "run": "echo \"Only runs on ESP8266 hardware\" && exit 1",
+    "flash": "make -C shed flash",
+    "update-firmware": "node update-all-firmware.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/milliamp/esp-homekit-shed.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/milliamp/esp-homekit-shed/issues"
+  },
+  "homepage": "https://github.com/milliamp/esp-homekit-shed#readme",
+  "devDependencies": {
+    "mdns-js": "^1.0.1"
+  }
+}

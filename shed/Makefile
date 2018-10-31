@@ -15,6 +15,10 @@ SENSOR1_PIN = 5 # D1
 SENSOR2_PIN = 4 # D2
 SENSOR3_PIN = 13 # D7
 
+SENSOR1_DHT22=true
+SENSOR2_DHT22=true
+SENSOR3_DHT22=false
+
 # Relay bank signal pins
 RELAY1_PIN = 2 # D4
 #RELAY2_PIN = 14 # D5
@@ -43,19 +47,26 @@ FLASH_MODE=dio
 
 BUILD_VERSION=`date +'"%Y%m%d.%H%M"'`
 
-HOMEKIT_DEBUG=1
+#HOMEKIT_DEBUG=1
 
 EXTRA_CFLAGS += -I../.. -DHOMEKIT_SHORT_APPLE_UUIDS \
 	-DBUILD_VERSION=$(BUILD_VERSION) \
 	-DSENSOR1_PIN=$(SENSOR1_PIN) \
 	-DSENSOR2_PIN=$(SENSOR2_PIN) \
 	-DSENSOR3_PIN=$(SENSOR3_PIN) \
+	-DSENSOR1_DHT22=$(SENSOR1_DHT22) \
+	-DSENSOR2_DHT22=$(SENSOR2_DHT22) \
+	-DSENSOR3_DHT22=$(SENSOR3_DHT22) \
 	-DMOTION_SENSOR_PIN=$(MOTION_SENSOR_PIN) \
 	-DINTERIOR_LIGHTS=$(INTERIOR_LIGHTS) \
 	-DEXTERIOR_FLOOD=$(EXTERIOR_FLOOD) \
 	-DWESTEAST_FAN=$(WESTEAST_FAN) \
 	-DEASTWEST_FAN=$(EASTWEST_FAN) \
 	-DBUTTON_PIN=$(BUTTON_PIN)
+
+# This is to ensure the datetime is update in firmware revision
+all:
+	@touch shed.c
 
 include $(SDK_PATH)/common.mk
 
@@ -67,6 +78,5 @@ ota:
 	echo binary >> tftp.tftp
 	echo put $(FW_FILE) firmware.bin >> tftp.tftp
 	echo quit >> tftp.tftp
-	$(MAKE) all
-	tftp $(ESPIP) < tftp.tftp || true
+	tftp $$ESPIP < tftp.tftp || true
 	rm tftp.tftp
